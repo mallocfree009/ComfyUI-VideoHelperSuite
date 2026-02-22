@@ -797,7 +797,7 @@ class VideoCombine2:
                 file_path,
                 format="WEBP",
                 exif=exif,
-                quality=95 # Default webp quality
+                quality=40 # thumbnail quality
             )
         elif thumbnail_type == "webp_lossless":
             first_image_file = f"{filename}_{counter:05}.webp"
