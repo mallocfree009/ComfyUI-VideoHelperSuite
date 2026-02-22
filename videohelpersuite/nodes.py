@@ -654,6 +654,7 @@ class VideoCombine2:
                 "audio": ("AUDIO",),
                 "meta_batch": ("VHS_BatchManager",),
                 "vae": ("VAE",),
+                "thumbnail_type": (["png", "webp", "webp_lossless", "None"], {"default": "png"}),
             },
             "hidden": ContainsAll({
                 "prompt": "PROMPT",
@@ -662,8 +663,8 @@ class VideoCombine2:
             }),
         }
 
-    RETURN_TYPES = ("VHS_FILENAMES",)
-    RETURN_NAMES = ("Filenames",)
+    RETURN_TYPES = ("VHS_FILENAMES", "IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("Filenames", "image_thumbnail", "filename", "filebasename")
     OUTPUT_NODE = True
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
     FUNCTION = "combine_video"
@@ -685,6 +686,7 @@ class VideoCombine2:
         manual_format_widgets=None,
         meta_batch=None,
         vae=None,
+        thumbnail_type="png",
         **kwargs
     ):
         if latents is not None:
@@ -776,15 +778,42 @@ class VideoCombine2:
             output_process = None
 
         # save first frame as png to keep metadata
-        first_image_file = f"{filename}_{counter:05}.png"
-        file_path = os.path.join(full_output_folder, first_image_file)
-        if extra_options.get('VHS_MetadataImage', True) != False:
+        file_path = None
+        if thumbnail_type == "png":
+            first_image_file = f"{filename}_{counter:05}.png"
+            file_path = os.path.join(full_output_folder, first_image_file)
             Image.fromarray(tensor_to_bytes(first_image)).save(
                 file_path,
                 pnginfo=metadata,
                 compress_level=4,
             )
-        output_files.append(file_path)
+        elif thumbnail_type == "webp":
+            first_image_file = f"{filename}_{counter:05}.webp"
+            file_path = os.path.join(full_output_folder, first_image_file)
+            #Save timestamp information
+            exif = Image.Exif()
+            exif[ExifTags.IFD.Exif] = {36867: datetime.datetime.now().isoformat(" ")[:19]}
+            Image.fromarray(tensor_to_bytes(first_image)).save(
+                file_path,
+                format="WEBP",
+                exif=exif,
+                quality=95 # Default webp quality
+            )
+        elif thumbnail_type == "webp_lossless":
+            first_image_file = f"{filename}_{counter:05}.webp"
+            file_path = os.path.join(full_output_folder, first_image_file)
+            #Save timestamp information
+            exif = Image.Exif()
+            exif[ExifTags.IFD.Exif] = {36867: datetime.datetime.now().isoformat(" ")[:19]}
+            Image.fromarray(tensor_to_bytes(first_image)).save(
+                file_path,
+                format="WEBP",
+                exif=exif,
+                lossless=True
+            )
+
+        if file_path is not None:
+            output_files.append(file_path)
 
         format_type, format_ext = format.split("/")
         if format_type == "image":
@@ -1015,13 +1044,18 @@ class VideoCombine2:
                 "type": "output" if save_output else "temp",
                 "format": format,
                 "frame_rate": frame_rate,
-                "workflow": first_image_file,
+                "workflow": first_image_file if 'first_image_file' in locals() else None,
                 "fullpath": output_files[-1],
             }
         if num_frames == 1 and 'png' in format and '%03d' in file:
             preview['format'] = 'image/png'
             preview['filename'] = file.replace('%03d', '001')
-        return {"ui": {"gifs": [preview]}, "result": ((save_output, output_files),)}
+
+        video_filename = file
+        video_filebasename = os.path.splitext(file)[0]
+        thumbnail_tensor = first_image.unsqueeze(0)
+
+        return {"ui": {"gifs": [preview]}, "result": ((save_output, output_files), thumbnail_tensor, video_filename, video_filebasename)}
 
 class LoadAudio:
     @classmethod

@@ -34,7 +34,7 @@ const convDict = {
     VHS_LoadImages : ["directory", null, "image_load_cap", "skip_first_images", "select_every_nth"],
     VHS_LoadImagesPath : ["directory", "image_load_cap", "skip_first_images", "select_every_nth"],
     VHS_VideoCombine : ["frame_rate", "loop_count", "filename_prefix", "format", "pingpong", "save_image"],
-    VHS_VideoCombine2 : ["frame_rate", "loop_count", "filename_prefix", "format", "pingpong", "save_image"],
+    VHS_VideoCombine2 : ["frame_rate", "loop_count", "filename_prefix", "format", "pingpong", "save_image", "thumbnail_type"],
     VHS_LoadVideo : ["video", "force_rate", "force_size", "frame_load_cap", "skip_first_frames", "select_every_nth"],
     VHS_LoadVideo2 : ["video", "force_rate", "force_size", "frame_load_cap", "skip_first_frames", "select_every_nth"],
     VHS_LoadVideoPath : ["video", "force_rate", "force_size", "frame_load_cap", "skip_first_frames", "select_every_nth"],
@@ -2063,6 +2063,19 @@ app.registerExtension({
                 });
             });
         } else if (nodeData?.name == "VHS_VideoCombine" || nodeData?.name == "VHS_VideoCombine2") {
+            if (nodeData.name == "VHS_VideoCombine2") {
+                 chainCallback(nodeType.prototype, "onNodeCreated", function() {
+                     if (!this.outputs.find(o => o.name === "image_thumbnail")) {
+                         this.addOutput("image_thumbnail", "IMAGE");
+                     }
+                     if (!this.outputs.find(o => o.name === "filename")) {
+                         this.addOutput("filename", "STRING");
+                     }
+                     if (!this.outputs.find(o => o.name === "filebasename")) {
+                         this.addOutput("filebasename", "STRING");
+                     }
+                 });
+            }
             addDateFormatting(nodeType, "filename_prefix");
             chainCallback(nodeType.prototype, "onExecuted", function(message) {
                 if (message?.gifs) {
