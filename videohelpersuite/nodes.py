@@ -1061,6 +1061,10 @@ class VideoCombine2:
         video_filebasename = os.path.splitext(file)[0]
         thumbnail_tensor = first_image.unsqueeze(0)
 
+        if save_output:
+            print(f"VHS Output File: {file}")
+            print(f"VHS Output Path: {output_files[-1]}")
+
         return {"ui": {"gifs": [preview]}, "result": ((save_output, output_files), thumbnail_tensor, video_filename, video_filebasename)}
 
 class LoadAudio:
