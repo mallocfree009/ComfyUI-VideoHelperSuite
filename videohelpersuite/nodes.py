@@ -821,6 +821,9 @@ class VideoCombine2:
         if file_path is not None:
             output_files.append(file_path)
 
+        for output_file in output_files:
+            print(f"VHS Output File: {output_file}")
+
         format_type, format_ext = format.split("/")
         if format_type == "image":
             if meta_batch is not None:
@@ -956,6 +959,8 @@ class VideoCombine2:
                 in_args_len = args.index("-i") + 2 # The index after ["-i", "-"]
                 args = args[:in_args_len] + video_format['inputs_main_pass'] + args[in_args_len:]
 
+            print(f"output_process file_path: {file_path}")
+                   
             if output_process is None:
                 if 'gifski_pass' in video_format:
                     format = 'image/gif'
@@ -1060,10 +1065,6 @@ class VideoCombine2:
         video_filename = file
         video_filebasename = os.path.splitext(file)[0]
         thumbnail_tensor = first_image.unsqueeze(0)
-
-        if save_output:
-            print(f"VHS Output File: {file}")
-            print(f"VHS Output Path: {output_files[-1]}")
 
         return {"ui": {"gifs": [preview]}, "result": ((save_output, output_files), thumbnail_tensor, video_filename, video_filebasename)}
 
