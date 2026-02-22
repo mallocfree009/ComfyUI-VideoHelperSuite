@@ -655,6 +655,7 @@ class VideoCombine2:
                 "meta_batch": ("VHS_BatchManager",),
                 "vae": ("VAE",),
                 "thumbnail_type": (["png", "webp", "webp_lossless", "None"], {"default": "png"}),
+                "filename_counter": ("BOOLEAN", {"default": True, "label_on": "Enabled", "label_off": "Disabled"}),
             },
             "hidden": ContainsAll({
                 "prompt": "PROMPT",
@@ -687,6 +688,7 @@ class VideoCombine2:
         meta_batch=None,
         vae=None,
         thumbnail_type="png",
+        filename_counter=True,
         **kwargs
     ):
         if latents is not None:
@@ -777,10 +779,14 @@ class VideoCombine2:
             counter = max_counter + 1
             output_process = None
 
+        format_counter = ""
+        if filename_counter:
+            format_counter = f"_{counter:05}"
+
         # save first frame as png to keep metadata
         file_path = None
         if thumbnail_type == "png":
-            first_image_file = f"{filename}_{counter:05}.png"
+            first_image_file = f"{filename}{format_counter}.png"
             file_path = os.path.join(full_output_folder, first_image_file)
             Image.fromarray(tensor_to_bytes(first_image)).save(
                 file_path,
@@ -788,7 +794,7 @@ class VideoCombine2:
                 compress_level=4,
             )
         elif thumbnail_type == "webp":
-            first_image_file = f"{filename}_{counter:05}.webp"
+            first_image_file = f"{filename}{format_counter}.webp"
             file_path = os.path.join(full_output_folder, first_image_file)
             #Save timestamp information
             exif = Image.Exif()
@@ -800,7 +806,7 @@ class VideoCombine2:
                 quality=40 # thumbnail quality
             )
         elif thumbnail_type == "webp_lossless":
-            first_image_file = f"{filename}_{counter:05}.webp"
+            first_image_file = f"{filename}{format_counter}.webp"
             file_path = os.path.join(full_output_folder, first_image_file)
             #Save timestamp information
             exif = Image.Exif()
@@ -828,7 +834,7 @@ class VideoCombine2:
                 exif[ExifTags.IFD.Exif] = {36867: datetime.datetime.now().isoformat(" ")[:19]}
                 image_kwargs['exif'] = exif
                 image_kwargs['lossless'] = kwargs.get("lossless", True)
-            file = f"{filename}_{counter:05}.{format_ext}"
+            file = f"{filename}{format_counter}.{format_ext}"
             file_path = os.path.join(full_output_folder, file)
             if pingpong:
                 images = to_pingpong(images)
@@ -902,7 +908,7 @@ class VideoCombine2:
                     i_pix_fmt = 'rgba'
                 else:
                     i_pix_fmt = 'rgb24'
-            file = f"{filename}_{counter:05}.{video_format['extension']}"
+            file = f"{filename}{format_counter}.{video_format['extension']}"
             file_path = os.path.join(full_output_folder, file)
             bitrate_arg = []
             bitrate = video_format.get('bitrate')
@@ -997,7 +1003,7 @@ class VideoCombine2:
                     pass
             if a_waveform is not None:
                 # Create audio file if input was provided
-                output_file_with_audio = f"{filename}_{counter:05}-audio.{video_format['extension']}"
+                output_file_with_audio = f"{filename}{format_counter}-audio.{video_format['extension']}"
                 output_file_with_audio_path = os.path.join(full_output_folder, output_file_with_audio)
                 if "audio_pass" not in video_format:
                     logger.warn("Selected video format does not have explicit audio support")

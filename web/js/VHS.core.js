@@ -34,7 +34,7 @@ const convDict = {
     VHS_LoadImages : ["directory", null, "image_load_cap", "skip_first_images", "select_every_nth"],
     VHS_LoadImagesPath : ["directory", "image_load_cap", "skip_first_images", "select_every_nth"],
     VHS_VideoCombine : ["frame_rate", "loop_count", "filename_prefix", "format", "pingpong", "save_image"],
-    VHS_VideoCombine2 : ["frame_rate", "loop_count", "filename_prefix", "format", "pingpong", "save_image", "thumbnail_type"],
+    VHS_VideoCombine2 : ["frame_rate", "loop_count", "filename_prefix", "format", "pingpong", "save_image", "thumbnail_type", "filename_counter"],
     VHS_LoadVideo : ["video", "force_rate", "force_size", "frame_load_cap", "skip_first_frames", "select_every_nth"],
     VHS_LoadVideo2 : ["video", "force_rate", "force_size", "frame_load_cap", "skip_first_frames", "select_every_nth"],
     VHS_LoadVideoPath : ["video", "force_rate", "force_size", "frame_load_cap", "skip_first_frames", "select_every_nth"],
