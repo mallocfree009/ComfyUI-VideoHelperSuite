@@ -158,6 +158,7 @@ def ffmpeg_process(args, video_format, video_metadata, file_path, env):
                     f.write(escape_ffmpeg_metadata(k, json.dumps(v)) + "\n")
 
         m_args = args[:1] + ["-i", metadata_path] + args[1:] + ["-metadata", "creation_time=now", "-movflags", "use_metadata_tags"]
+        logger.info(f"Executing: {' '.join(map(str, m_args + [file_path]))}")
         with subprocess.Popen(m_args + [file_path], stderr=subprocess.PIPE,
                               stdin=subprocess.PIPE, env=env) as proc:
             try:
@@ -181,6 +182,7 @@ def ffmpeg_process(args, video_format, video_metadata, file_path, env):
                 print(err.decode(*ENCODE_ARGS), end="", file=sys.stderr)
                 logger.warn("An error occurred when saving with metadata")
     if res != b'':
+        logger.info(f"Executing: {' '.join(map(str, args + [file_path]))}")
         with subprocess.Popen(args + [file_path], stderr=subprocess.PIPE,
                               stdin=subprocess.PIPE, env=env) as proc:
             try:
@@ -201,13 +203,17 @@ def ffmpeg_process(args, video_format, video_metadata, file_path, env):
 
 def gifski_process(args, dimensions, frame_rate, video_format, file_path, env):
     frame_data = yield
-    with subprocess.Popen(args + video_format['main_pass'] + ['-f', 'yuv4mpegpipe', '-'],
+    ff_args = args + video_format['main_pass'] + ['-f', 'yuv4mpegpipe', '-']
+    logger.info(f"Executing: {' '.join(map(str, ff_args))}")
+    with subprocess.Popen(ff_args,
                           stderr=subprocess.PIPE, stdin=subprocess.PIPE,
                           stdout=subprocess.PIPE, env=env) as procff:
-        with subprocess.Popen([gifski_path] + video_format['gifski_pass']
-                              + ['-W', f'{dimensions[0]}', '-H', f'{dimensions[1]}']
-                              + ['-r', f'{frame_rate}']
-                              + ['-q', '-o', file_path, '-'], stderr=subprocess.PIPE,
+        gs_args = [gifski_path] + video_format['gifski_pass'] \
+                              + ['-W', f'{dimensions[0]}', '-H', f'{dimensions[1]}'] \
+                              + ['-r', f'{frame_rate}'] \
+                              + ['-q', '-o', file_path, '-']
+        logger.info(f"Executing: {' '.join(map(str, gs_args))}")
+        with subprocess.Popen(gs_args, stderr=subprocess.PIPE,
                               stdin=procff.stdout, stdout=subprocess.PIPE,
                               env=env) as procgs:
             try:
@@ -520,6 +526,7 @@ class VideoCombine:
                 in_args_len = args.index("-i") + 2 # The index after ["-i", "-"]
                 pre_pass_args = args[:in_args_len] + video_format['pre_pass']
                 merge_filter_args(pre_pass_args)
+                logger.info(f"Executing pre-pass: {' '.join(map(str, pre_pass_args))}")
                 try:
                     subprocess.run(pre_pass_args, input=images[0], env=env,
                                    capture_output=True, check=True)
@@ -602,6 +609,7 @@ class VideoCombine:
                 audio_data = audio['waveform'].squeeze(0).transpose(0,1) \
                         .numpy().tobytes()
                 merge_filter_args(mux_args, '-af')
+                logger.info(f"Executing audio mux: {' '.join(map(str, mux_args))}")
                 try:
                     res = subprocess.run(mux_args, input=audio_data,
                                          env=env, capture_output=True, check=True)
@@ -949,6 +957,7 @@ class VideoCombine2:
                 in_args_len = args.index("-i") + 2 # The index after ["-i", "-"]
                 pre_pass_args = args[:in_args_len] + video_format['pre_pass']
                 merge_filter_args(pre_pass_args)
+                logger.info(f"Executing pre-pass: {' '.join(map(str, pre_pass_args))}")
                 try:
                     subprocess.run(pre_pass_args, input=images[0], env=env,
                                    capture_output=True, check=True)
@@ -1033,6 +1042,7 @@ class VideoCombine2:
                 audio_data = audio['waveform'].squeeze(0).transpose(0,1) \
                         .numpy().tobytes()
                 merge_filter_args(mux_args, '-af')
+                logger.info(f"Executing audio mux: {' '.join(map(str, mux_args))}")
                 try:
                     res = subprocess.run(mux_args, input=audio_data,
                                          env=env, capture_output=True, check=True)
