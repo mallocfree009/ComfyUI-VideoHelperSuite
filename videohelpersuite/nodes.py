@@ -640,6 +640,46 @@ class VideoCombine:
             preview['filename'] = file.replace('%03d', '001')
         return {"ui": {"gifs": [preview]}, "result": ((save_output, output_files),)}
 
+def get_save_path_unrestricted(filename_prefix, output_dir):
+    """出力フォルダ外への保存を許可するパス解決（comfyui-mf-toolsの仕様に準拠）。
+
+    folder_paths.get_save_image_path() と同様の値を返すが、
+    出力フォルダ外チェック（サンドボックス）を行わない。
+
+    filename_prefix が絶対パスの場合はそのまま使用し、
+    相対パスの場合は output_dir と結合する（`..` も許可）。
+
+    Returns:
+        (full_output_folder, filename, subfolder, is_outside)
+        is_outside: 保存先が output_dir の外にある場合 True
+          （その場合ComfyUIのUIプレビューは表示できない）
+    """
+    if os.path.isabs(filename_prefix):
+        full_path = os.path.abspath(filename_prefix)
+    else:
+        full_path = os.path.abspath(os.path.join(output_dir, filename_prefix))
+
+    full_output_folder = os.path.dirname(full_path)
+    filename = os.path.basename(full_path)
+
+    # output_dir 内かどうかを判定し、内側なら subfolder を算出する
+    is_outside = True
+    subfolder = ""
+    try:
+        rel = os.path.relpath(full_output_folder, os.path.abspath(output_dir))
+        if rel == ".":
+            subfolder = ""
+            is_outside = False
+        elif not rel.startswith(".."):
+            subfolder = rel
+            is_outside = False
+    except ValueError:
+        # Windowsでドライブが異なる場合など
+        pass
+
+    os.makedirs(full_output_folder, exist_ok=True)
+    return full_output_folder, filename, subfolder, is_outside
+
 class VideoCombine2:
     @classmethod
     def INPUT_TYPES(s):
@@ -745,10 +785,9 @@ class VideoCombine2:
         (
             full_output_folder,
             filename,
-            _,
             subfolder,
-            _,
-        ) = folder_paths.get_save_image_path(filename_prefix, output_dir)
+            is_outside,
+        ) = get_save_path_unrestricted(filename_prefix, output_dir)
         output_files = []
 
         metadata = PngInfo()
@@ -1076,7 +1115,9 @@ class VideoCombine2:
         video_filebasename = os.path.splitext(file)[0]
         thumbnail_tensor = first_image.unsqueeze(0)
 
-        return {"ui": {"gifs": [preview]}, "result": ((save_output, output_files), thumbnail_tensor, video_filename, video_filebasename)}
+        # 出力フォルダ外はComfyUIの/view APIで配信できないためプレビュー対象外
+        ui = {} if is_outside else {"gifs": [preview]}
+        return {"ui": ui, "result": ((save_output, output_files), thumbnail_tensor, video_filename, video_filebasename)}
 
 class LoadAudio:
     @classmethod
