@@ -26,6 +26,13 @@ VideoCombine2 は既存ワークフロー互換のためそのまま残す。出
 | `audio_fade_in_start_level` | FLOAT | 0.0 | 0–1.0, step 0.01 | フェードイン開始時の音量（1.0 = 原音量） |
 | `audio_fade_out_seconds` | FLOAT | 0.0 | 0–1e4, step 0.01 | 出力音声の終端フェードアウト長 |
 | `audio_fade_out_end_level` | FLOAT | 0.0 | 0–1.0, step 0.01 | フェードアウト終了時の音量（1.0 = 原音量） |
+| `source_frame_rate` | FLOAT | 0.0 | 0–1e4, step 0.01 | 入力素材が想定するフレームレート。0 = 無効 |
+| `audio_speed_mode` | COMBO | `atempo` | `atempo` / `resample` | 音声の時間圧縮方式 |
+
+`source_frame_rate` / `audio_speed_mode` の詳細は
+[VideoCombine3_framerate_scaling.md](VideoCombine3_framerate_scaling.md) を参照。
+`source_frame_rate` を指定すると `speed_ratio = frame_rate / source_frame_rate` で音声を時間圧縮／伸長し、
+**音声のトリム計算の分母も `frame_rate` ではなく `source_frame_rate` になる**（4.1 の記述より優先）。
 
 JS 側 `web/js/VHS.core.js` の `VHS_VideoCombine3` エントリを `VideoCombine2` と同じ内容で追加する
 （ウィジェット順序リスト・`save_output→save_image` マップ・`onNodeCreated` の追加出力・プレビュー系ハンドラ）。

@@ -1140,6 +1140,24 @@ def trim_frame_iterator(images, skip_first, skip_last):
     return gen()
 
 
+def atempo_chain(ratio):
+    """速度比を atempo の有効範囲(0.5-2.0)に収まる係数へ分解する。
+
+    新しめのffmpegは0.5-100まで受け付けるが、古いビルドは0.5-2.0が上限なので
+    可搬性のために常に分解する。
+    """
+    parts = []
+    while ratio > 2.0:
+        parts.append(2.0)
+        ratio /= 2.0
+    while ratio < 0.5:
+        parts.append(0.5)
+        ratio /= 0.5
+    if abs(ratio - 1.0) > 1e-6:
+        parts.append(ratio)
+    return [f"atempo={p:.6f}" for p in parts]
+
+
 class VideoCombine3:
     @classmethod
     def INPUT_TYPES(s):
@@ -1170,6 +1188,8 @@ class VideoCombine3:
                 "audio_fade_in_start_level": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "audio_fade_out_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10000.0, "step": 0.01}),
                 "audio_fade_out_end_level": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "source_frame_rate": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10000.0, "step": 0.01}),
+                "audio_speed_mode": (["atempo", "resample"], {"default": "atempo"}),
             },
             "hidden": ContainsAll({
                 "prompt": "PROMPT",
@@ -1209,6 +1229,8 @@ class VideoCombine3:
         audio_fade_in_start_level=0.0,
         audio_fade_out_seconds=0.0,
         audio_fade_out_end_level=0.0,
+        source_frame_rate=0.0,
+        audio_speed_mode="atempo",
         **kwargs
     ):
         if latents is not None:
@@ -1238,6 +1260,16 @@ class VideoCombine3:
             logger.info(f"VideoCombine3: trimming frames (skip_first={skip_first_frames}, "
                         f"skip_last={skip_last_frames}), {num_frames_in} -> "
                         f"{num_frames_in - skip_first_frames - skip_last_frames}")
+
+        #入力素材が想定するフレームレート。0なら frame_rate と同じ＝速度変更なし
+        source_frame_rate = max(0.0, float(source_frame_rate))
+        source_fps = source_frame_rate if source_frame_rate > 0 else float(frame_rate)
+        speed_ratio = float(frame_rate) / source_fps
+        if abs(speed_ratio - 1.0) < 1e-6:
+            speed_ratio = 1.0
+        elif speed_ratio < 0.25 or speed_ratio > 4.0:
+            logger.warn(f"Extreme audio speed ratio {speed_ratio:.3f}x "
+                        f"({source_fps} -> {frame_rate} fps), audio quality will suffer")
 
         num_frames = num_frames_in - skip_first_frames - skip_last_frames
         #トリム後のフレーム数。pingpong/loopで num_frames が増える前の値を音声長に使う
@@ -1368,8 +1400,10 @@ class VideoCombine3:
         if format_type == "image":
             if meta_batch is not None:
                 raise Exception("Pillow('image/') formats are not compatible with batched output")
-            if audio is not None and (audio_fade_in_seconds > 0 or audio_fade_out_seconds > 0):
-                logger.warn("Pillow('image/') formats have no audio support, audio fade settings are ignored")
+            if audio is not None and (audio_fade_in_seconds > 0 or audio_fade_out_seconds > 0
+                                      or speed_ratio != 1.0):
+                logger.warn("Pillow('image/') formats have no audio support, "
+                            "audio fade and source_frame_rate settings are ignored")
             image_kwargs = {}
             if format_ext == "gif":
                 image_kwargs['disposal'] = 2
@@ -1557,12 +1591,15 @@ class VideoCombine3:
             fade_in_level = min(1.0, max(0.0, float(audio_fade_in_start_level)))
             fade_out_level = min(1.0, max(0.0, float(audio_fade_out_end_level)))
             afade_args = []
+            aspeed_args = []
             if a_waveform is not None:
-                #Trim the audio so it matches the trimmed frame range
+                #Trim the audio so it matches the trimmed frame range.
+                #The input audio lives on the source_fps timeline, so frame counts
+                #must be converted with source_fps, not the output frame_rate
                 sample_rate = audio['sample_rate']
                 total_samples = a_waveform.size(2)
-                start_sample = min(round(skip_first_frames / frame_rate * sample_rate), total_samples)
-                out_samples = round(trimmed_frame_count / frame_rate * sample_rate)
+                start_sample = min(round(skip_first_frames / source_fps * sample_rate), total_samples)
+                out_samples = round(trimmed_frame_count / source_fps * sample_rate)
                 end_sample = min(start_sample + out_samples, total_samples)
                 if end_sample <= start_sample:
                     logger.warn("No audio remains after applying skip_first_frames, audio will be omitted")
@@ -1573,7 +1610,23 @@ class VideoCombine3:
                                     f"[{start_sample}, {end_sample}) of {total_samples}")
                         a_waveform = a_waveform[:, :, start_sample:end_sample]
 
-                    audio_dur = (end_sample - start_sample) / sample_rate
+                    #Compress/stretch the audio to match the output frame rate.
+                    #Must come before afade so fade durations stay in output time
+                    audio_dur_src = (end_sample - start_sample) / sample_rate
+                    audio_dur = audio_dur_src / speed_ratio
+                    if speed_ratio != 1.0:
+                        if audio_speed_mode == "resample":
+                            #Reinterprets the sample rate, so pitch shifts with the speed
+                            speed_filters = [f"asetrate={round(sample_rate * speed_ratio)}",
+                                             f"aresample={sample_rate}"]
+                        else:
+                            #Time stretch that preserves pitch
+                            speed_filters = atempo_chain(speed_ratio)
+                        aspeed_args = ["-af", ",".join(speed_filters)]
+                        logger.info(f"VideoCombine3: audio speed x{speed_ratio:.4f} "
+                                    f"({source_fps} -> {frame_rate} fps), mode={audio_speed_mode}, "
+                                    f"{audio_dur_src:.3f}s -> {audio_dur:.3f}s")
+
                     fade_in = audio_fade_in_seconds
                     fade_out = audio_fade_out_seconds
                     if fade_in + fade_out > audio_dur:
@@ -1614,7 +1667,8 @@ class VideoCombine3:
                             "-ar", str(audio['sample_rate']), "-ac", str(channels),
                             "-f", "f32le", "-i", "-", "-c:v", "copy"] \
                             + video_format["audio_pass"] \
-                            + afade_args + apad + ["-shortest", output_file_with_audio_path]
+                            + aspeed_args + afade_args + apad \
+                            + ["-shortest", output_file_with_audio_path]
 
                 audio_data = a_waveform.squeeze(0).transpose(0,1) \
                         .numpy().tobytes()
