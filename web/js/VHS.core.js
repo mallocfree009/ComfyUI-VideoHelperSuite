@@ -2062,8 +2062,9 @@ app.registerExtension({
                     this.updateParameters(params, true);
                 });
             });
-        } else if (nodeData?.name == "VHS_VideoCombine" || nodeData?.name == "VHS_VideoCombine2") {
-            if (nodeData.name == "VHS_VideoCombine2") {
+        } else if (nodeData?.name == "VHS_VideoCombine" || nodeData?.name == "VHS_VideoCombine2"
+                   || nodeData?.name == "VHS_VideoCombine3") {
+            if (nodeData.name == "VHS_VideoCombine2" || nodeData.name == "VHS_VideoCombine3") {
                  chainCallback(nodeType.prototype, "onNodeCreated", function() {
                      if (!this.outputs.find(o => o.name === "image_thumbnail")) {
                          this.addOutput("image_thumbnail", "IMAGE");

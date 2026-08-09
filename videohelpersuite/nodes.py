@@ -13,6 +13,7 @@ from pathlib import Path
 from string import Template
 import itertools
 import functools
+from collections import deque
 
 import folder_paths
 from .logger import logger
@@ -1119,6 +1120,552 @@ class VideoCombine2:
         ui = {} if is_outside else {"gifs": [preview]}
         return {"ui": ui, "result": ((save_output, output_files), thumbnail_tensor, video_filename, video_filebasename)}
 
+def trim_frame_iterator(images, skip_first, skip_last):
+    """先頭/末尾フレームを遅延評価のまま捨てる。
+
+    末尾のスキップは skip_last 枚だけをバッファに保持することで、
+    全フレームをメモリに載せずに実現する。
+    """
+    if skip_first:
+        images = itertools.islice(images, skip_first, None)
+    if not skip_last:
+        return images
+
+    def gen():
+        buffer = deque()
+        for image in images:
+            if len(buffer) == skip_last:
+                yield buffer.popleft()
+            buffer.append(image)
+    return gen()
+
+
+class VideoCombine3:
+    @classmethod
+    def INPUT_TYPES(s):
+        ffmpeg_formats, format_widgets = get_video_formats()
+        format_widgets["image/webp"] = [['lossless', "BOOLEAN", {'default': True}]]
+        return {
+            "required": {
+                "images": (imageOrLatent,),
+                "frame_rate": (
+                    floatOrInt,
+                    {"default": 8, "min": 1, "step": 1},
+                ),
+                "loop_count": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
+                "filename_prefix": ("STRING", {"default": "AnimateDiff"}),
+                "format": (["image/gif", "image/webp"] + ffmpeg_formats, {'formats': format_widgets}),
+                "pingpong": ("BOOLEAN", {"default": False}),
+                "save_output": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "audio": ("AUDIO",),
+                "meta_batch": ("VHS_BatchManager",),
+                "vae": ("VAE",),
+                "thumbnail_type": (["png", "webp", "webp_lossless", "None"], {"default": "png"}),
+                "filename_counter": ("BOOLEAN", {"default": True, "label_on": "Enabled", "label_off": "Disabled"}),
+                "skip_first_frames": ("INT", {"default": 0, "min": 0, "max": BIGMAX, "step": 1}),
+                "skip_last_frames": ("INT", {"default": 0, "min": 0, "max": BIGMAX, "step": 1}),
+                "audio_fade_in_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10000.0, "step": 0.01}),
+                "audio_fade_in_start_level": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "audio_fade_out_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10000.0, "step": 0.01}),
+                "audio_fade_out_end_level": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+            },
+            "hidden": ContainsAll({
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+                "unique_id": "UNIQUE_ID"
+            }),
+        }
+
+    RETURN_TYPES = ("VHS_FILENAMES", "IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("Filenames", "image_thumbnail", "filename", "filebasename")
+    OUTPUT_NODE = True
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
+    FUNCTION = "combine_video"
+
+    def combine_video(
+        self,
+        frame_rate: int,
+        loop_count: int,
+        images=None,
+        latents=None,
+        filename_prefix="AnimateDiff",
+        format="image/gif",
+        pingpong=False,
+        save_output=True,
+        prompt=None,
+        extra_pnginfo=None,
+        audio=None,
+        unique_id=None,
+        manual_format_widgets=None,
+        meta_batch=None,
+        vae=None,
+        thumbnail_type="png",
+        filename_counter=True,
+        skip_first_frames=0,
+        skip_last_frames=0,
+        audio_fade_in_seconds=0.0,
+        audio_fade_in_start_level=0.0,
+        audio_fade_out_seconds=0.0,
+        audio_fade_out_end_level=0.0,
+        **kwargs
+    ):
+        if latents is not None:
+            images = latents
+        if images is None:
+            return ((save_output, []),)
+        if vae is not None:
+            if isinstance(images, dict):
+                images = images['samples']
+            else:
+                vae = None
+
+        if isinstance(images, torch.Tensor) and images.size(0) == 0:
+            return ((save_output, []),)
+        num_frames_in = len(images)
+
+        skip_first_frames = max(0, int(skip_first_frames))
+        skip_last_frames = max(0, int(skip_last_frames))
+        if skip_first_frames or skip_last_frames:
+            if meta_batch is not None:
+                raise Exception("skip_first_frames/skip_last_frames are incompatible with Batch Manager, "
+                                "since the first and last frames of the whole sequence cannot be determined "
+                                "from a single batch.")
+            if skip_first_frames + skip_last_frames >= num_frames_in:
+                raise Exception(f"Nothing would be left to save: {num_frames_in} input frames, "
+                                f"skip_first_frames={skip_first_frames}, skip_last_frames={skip_last_frames}.")
+            logger.info(f"VideoCombine3: trimming frames (skip_first={skip_first_frames}, "
+                        f"skip_last={skip_last_frames}), {num_frames_in} -> "
+                        f"{num_frames_in - skip_first_frames - skip_last_frames}")
+
+        num_frames = num_frames_in - skip_first_frames - skip_last_frames
+        #トリム後のフレーム数。pingpong/loopで num_frames が増える前の値を音声長に使う
+        trimmed_frame_count = num_frames
+        pbar = ProgressBar(num_frames)
+        if vae is not None:
+            downscale_ratio = getattr(vae, "downscale_ratio", 8)
+            width = images.size(-1)*downscale_ratio
+            height = images.size(-2)*downscale_ratio
+            frames_per_batch = (1920 * 1080 * 16) // (width * height) or 1
+            #Python 3.12 adds an itertools.batched, but it's easily replicated for legacy support
+            def batched(it, n):
+                while batch := tuple(itertools.islice(it, n)):
+                    yield batch
+            def batched_encode(images, vae, frames_per_batch):
+                for batch in batched(iter(images), frames_per_batch):
+                    image_batch = torch.from_numpy(np.array(batch))
+                    yield from vae.decode(image_batch)
+            images = batched_encode(images, vae, frames_per_batch)
+            images = trim_frame_iterator(images, skip_first_frames, skip_last_frames)
+            first_image = next(images)
+            #repush first_image
+            images = itertools.chain([first_image], images)
+            #A single image has 3 dimensions. Discard higher dimensions
+            while len(first_image.shape) > 3:
+                first_image = first_image[0]
+        else:
+            if skip_first_frames or skip_last_frames:
+                images = images[skip_first_frames:num_frames_in - skip_last_frames]
+            first_image = images[0]
+            images = iter(images)
+        # get output information
+        output_dir = (
+            folder_paths.get_output_directory()
+            if save_output
+            else folder_paths.get_temp_directory()
+        )
+        (
+            full_output_folder,
+            filename,
+            subfolder,
+            is_outside,
+        ) = get_save_path_unrestricted(filename_prefix, output_dir)
+        output_files = []
+
+        metadata = PngInfo()
+        video_metadata = {}
+        if prompt is not None:
+            metadata.add_text("prompt", json.dumps(prompt))
+            video_metadata["prompt"] = json.dumps(prompt)
+        if extra_pnginfo is not None:
+            for x in extra_pnginfo:
+                metadata.add_text(x, json.dumps(extra_pnginfo[x]))
+                video_metadata[x] = extra_pnginfo[x]
+            extra_options = extra_pnginfo.get('workflow', {}).get('extra', {})
+        else:
+            extra_options = {}
+        metadata.add_text("CreationTime", datetime.datetime.now().isoformat(" ")[:19])
+
+        if meta_batch is not None and unique_id in meta_batch.outputs:
+            (counter, output_process) = meta_batch.outputs[unique_id]
+        else:
+            # comfy counter workaround
+            max_counter = 0
+
+            # Loop through the existing files
+            matcher = re.compile(f"{re.escape(filename)}_(\\d+)\\D*\\..+", re.IGNORECASE)
+            for existing_file in os.listdir(full_output_folder):
+                # Check if the file matches the expected format
+                match = matcher.fullmatch(existing_file)
+                if match:
+                    # Extract the numeric portion of the filename
+                    file_counter = int(match.group(1))
+                    # Update the maximum counter value if necessary
+                    if file_counter > max_counter:
+                        max_counter = file_counter
+
+            # Increment the counter by 1 to get the next available value
+            counter = max_counter + 1
+            output_process = None
+
+        format_counter = ""
+        if filename_counter:
+            format_counter = f"_{counter:05}"
+
+        # save first frame as png to keep metadata
+        file_path = None
+        if thumbnail_type == "png":
+            first_image_file = f"{filename}{format_counter}.png"
+            file_path = os.path.join(full_output_folder, first_image_file)
+            Image.fromarray(tensor_to_bytes(first_image)).save(
+                file_path,
+                pnginfo=metadata,
+                compress_level=4,
+            )
+        elif thumbnail_type == "webp":
+            first_image_file = f"{filename}{format_counter}.webp"
+            file_path = os.path.join(full_output_folder, first_image_file)
+            #Save timestamp information
+            exif = Image.Exif()
+            exif[ExifTags.IFD.Exif] = {36867: datetime.datetime.now().isoformat(" ")[:19]}
+            Image.fromarray(tensor_to_bytes(first_image)).save(
+                file_path,
+                format="WEBP",
+                exif=exif,
+                quality=40 # thumbnail quality
+            )
+        elif thumbnail_type == "webp_lossless":
+            first_image_file = f"{filename}{format_counter}.webp"
+            file_path = os.path.join(full_output_folder, first_image_file)
+            #Save timestamp information
+            exif = Image.Exif()
+            exif[ExifTags.IFD.Exif] = {36867: datetime.datetime.now().isoformat(" ")[:19]}
+            Image.fromarray(tensor_to_bytes(first_image)).save(
+                file_path,
+                format="WEBP",
+                exif=exif,
+                lossless=True
+            )
+
+        if file_path is not None:
+            output_files.append(file_path)
+
+        for output_file in output_files:
+            print(f"VHS Output File: {output_file}")
+
+        format_type, format_ext = format.split("/")
+        if format_type == "image":
+            if meta_batch is not None:
+                raise Exception("Pillow('image/') formats are not compatible with batched output")
+            if audio is not None and (audio_fade_in_seconds > 0 or audio_fade_out_seconds > 0):
+                logger.warn("Pillow('image/') formats have no audio support, audio fade settings are ignored")
+            image_kwargs = {}
+            if format_ext == "gif":
+                image_kwargs['disposal'] = 2
+            if format_ext == "webp":
+                #Save timestamp information
+                exif = Image.Exif()
+                exif[ExifTags.IFD.Exif] = {36867: datetime.datetime.now().isoformat(" ")[:19]}
+                image_kwargs['exif'] = exif
+                image_kwargs['lossless'] = kwargs.get("lossless", True)
+            file = f"{filename}{format_counter}.{format_ext}"
+            file_path = os.path.join(full_output_folder, file)
+            if pingpong:
+                images = to_pingpong(images)
+            def frames_gen(images):
+                for i in images:
+                    pbar.update(1)
+                    yield Image.fromarray(tensor_to_bytes(i))
+            frames = frames_gen(images)
+            # Use pillow directly to save an animated image
+            next(frames).save(
+                file_path,
+                format=format_ext.upper(),
+                save_all=True,
+                append_images=frames,
+                duration=round(1000 / frame_rate),
+                loop=loop_count,
+                compress_level=4,
+                **image_kwargs
+            )
+            output_files.append(file_path)
+        else:
+            # Use ffmpeg to save a video
+            if ffmpeg_path is None:
+                raise ProcessLookupError(f"ffmpeg is required for video outputs and could not be found.\nIn order to use video outputs, you must either:\n- Install imageio-ffmpeg with pip,\n- Place a ffmpeg executable in {os.path.abspath('')}, or\n- Install ffmpeg and add it to the system path.")
+
+            if manual_format_widgets is not None:
+                logger.warn("Format args can now be passed directly. The manual_format_widgets argument is now deprecated")
+                kwargs.update(manual_format_widgets)
+
+            has_alpha = first_image.shape[-1] == 4
+            kwargs["has_alpha"] = has_alpha
+            video_format = apply_format_widgets(format_ext, kwargs)
+            dim_alignment = video_format.get("dim_alignment", 2)
+            if (first_image.shape[1] % dim_alignment) or (first_image.shape[0] % dim_alignment):
+                #output frames must be padded
+                to_pad = (-first_image.shape[1] % dim_alignment,
+                          -first_image.shape[0] % dim_alignment)
+                padding = (to_pad[0]//2, to_pad[0] - to_pad[0]//2,
+                           to_pad[1]//2, to_pad[1] - to_pad[1]//2)
+                padfunc = torch.nn.ReplicationPad2d(padding)
+                def pad(image):
+                    image = image.permute((2,0,1))#HWC to CHW
+                    padded = padfunc(image.to(dtype=torch.float32))
+                    return padded.permute((1,2,0))
+                images = map(pad, images)
+                dimensions = (-first_image.shape[1] % dim_alignment + first_image.shape[1],
+                              -first_image.shape[0] % dim_alignment + first_image.shape[0])
+                logger.warn("Output images were not of valid resolution and have had padding applied")
+            else:
+                dimensions = (first_image.shape[1], first_image.shape[0])
+            if pingpong:
+                if meta_batch is not None:
+                    logger.error("pingpong is incompatible with batched output")
+                images = to_pingpong(images)
+                if num_frames > 2:
+                    num_frames += num_frames -2
+                    pbar.total = num_frames
+            if loop_count > 0:
+                loop_args = ["-vf", "loop=loop=" + str(loop_count)+":size=" + str(num_frames)]
+            else:
+                loop_args = []
+            if video_format.get('input_color_depth', '8bit') == '16bit':
+                images = map(tensor_to_shorts, images)
+                if has_alpha:
+                    i_pix_fmt = 'rgba64'
+                else:
+                    i_pix_fmt = 'rgb48'
+            else:
+                images = map(tensor_to_bytes, images)
+                if has_alpha:
+                    i_pix_fmt = 'rgba'
+                else:
+                    i_pix_fmt = 'rgb24'
+            file = f"{filename}{format_counter}.{video_format['extension']}"
+            file_path = os.path.join(full_output_folder, file)
+            bitrate_arg = []
+            bitrate = video_format.get('bitrate')
+            if bitrate is not None:
+                bitrate_arg = ["-b:v", str(bitrate) + "M" if video_format.get('megabit') == 'True' else str(bitrate) + "K"]
+            args = [ffmpeg_path, "-v", "error", "-f", "rawvideo", "-pix_fmt", i_pix_fmt,
+                    # The image data is in an undefined generic RGB color space, which in practice means sRGB.
+                    # sRGB has the same primaries and matrix as BT.709, but a different transfer function (gamma),
+                    # called by the sRGB standard name IEC 61966-2-1. However, video hosting platforms like YouTube
+                    # standardize on full BT.709 and will convert the colors accordingly. This last minute change
+                    # in colors can be confusing to users. We can counter it by lying about the transfer function
+                    # on a per format basis, i.e. for video we will lie to FFmpeg that it is already BT.709. Also,
+                    # because the input data is in RGB (not YUV) it is more efficient (fewer scale filter invocations)
+                    # to specify the input color space as RGB and then later, if the format actually wants YUV,
+                    # to convert it to BT.709 YUV via FFmpeg's -vf "scale=out_color_matrix=bt709".
+                    "-color_range", "pc", "-colorspace", "rgb", "-color_primaries", "bt709",
+                    "-color_trc", video_format.get("fake_trc", "iec61966-2-1"),
+                    "-s", f"{dimensions[0]}x{dimensions[1]}", "-r", str(frame_rate), "-i", "-"] \
+                    + loop_args
+
+            images = map(lambda x: x.tobytes(), images)
+            env=os.environ.copy()
+            if  "environment" in video_format:
+                env.update(video_format["environment"])
+
+            if "pre_pass" in video_format:
+                if meta_batch is not None:
+                    #Performing a prepass requires keeping access to all frames.
+                    #Potential solutions include keeping just output frames in
+                    #memory or using 3 passes with intermediate file, but
+                    #very long gifs probably shouldn't be encouraged
+                    raise Exception("Formats which require a pre_pass are incompatible with Batch Manager.")
+                images = [b''.join(images)]
+                os.makedirs(folder_paths.get_temp_directory(), exist_ok=True)
+                in_args_len = args.index("-i") + 2 # The index after ["-i", "-"]
+                pre_pass_args = args[:in_args_len] + video_format['pre_pass']
+                merge_filter_args(pre_pass_args)
+                logger.info(f"Executing pre-pass: {' '.join(map(str, pre_pass_args))}")
+                try:
+                    subprocess.run(pre_pass_args, input=images[0], env=env,
+                                   capture_output=True, check=True)
+                except subprocess.CalledProcessError as e:
+                    raise Exception("An error occurred in the ffmpeg prepass:\n" \
+                            + e.stderr.decode(*ENCODE_ARGS))
+            if "inputs_main_pass" in video_format:
+                in_args_len = args.index("-i") + 2 # The index after ["-i", "-"]
+                args = args[:in_args_len] + video_format['inputs_main_pass'] + args[in_args_len:]
+
+            print(f"output_process file_path: {file_path}")
+
+            if output_process is None:
+                if 'gifski_pass' in video_format:
+                    format = 'image/gif'
+                    output_process = gifski_process(args, dimensions, frame_rate, video_format, file_path, env)
+                    audio = None
+                else:
+                    args += video_format['main_pass'] + bitrate_arg
+                    merge_filter_args(args)
+                    output_process = ffmpeg_process(args, video_format, video_metadata, file_path, env)
+                #Proceed to first yield
+                output_process.send(None)
+                if meta_batch is not None:
+                    meta_batch.outputs[unique_id] = (counter, output_process)
+
+            for image in images:
+                pbar.update(1)
+                output_process.send(image)
+            if meta_batch is not None:
+                requeue_workflow((meta_batch.unique_id, not meta_batch.has_closed_inputs))
+            if meta_batch is None or meta_batch.has_closed_inputs:
+                #Close pipe and wait for termination.
+                try:
+                    total_frames_output = output_process.send(None)
+                    output_process.send(None)
+                except StopIteration:
+                    pass
+                if meta_batch is not None:
+                    meta_batch.outputs.pop(unique_id)
+                    if len(meta_batch.outputs) == 0:
+                        meta_batch.reset()
+            else:
+                #batch is unfinished
+                #TODO: Check if empty output breaks other custom nodes
+                return {"ui": {"unfinished_batch": [True]}, "result": ((save_output, []),)}
+
+            output_files.append(file_path)
+
+
+            a_waveform = None
+            if audio is not None:
+                try:
+                    #safely check if audio produced by VHS_LoadVideo actually exists
+                    a_waveform = audio['waveform']
+                except:
+                    pass
+
+            audio_fade_in_seconds = max(0.0, float(audio_fade_in_seconds))
+            audio_fade_out_seconds = max(0.0, float(audio_fade_out_seconds))
+            #afade's "silence" gain is the level at the quiet end of the fade:
+            #the start for a fade-in, the end for a fade-out
+            fade_in_level = min(1.0, max(0.0, float(audio_fade_in_start_level)))
+            fade_out_level = min(1.0, max(0.0, float(audio_fade_out_end_level)))
+            afade_args = []
+            if a_waveform is not None:
+                #Trim the audio so it matches the trimmed frame range
+                sample_rate = audio['sample_rate']
+                total_samples = a_waveform.size(2)
+                start_sample = min(round(skip_first_frames / frame_rate * sample_rate), total_samples)
+                out_samples = round(trimmed_frame_count / frame_rate * sample_rate)
+                end_sample = min(start_sample + out_samples, total_samples)
+                if end_sample <= start_sample:
+                    logger.warn("No audio remains after applying skip_first_frames, audio will be omitted")
+                    a_waveform = None
+                else:
+                    if start_sample != 0 or end_sample != total_samples:
+                        logger.info(f"VideoCombine3: trimming audio to samples "
+                                    f"[{start_sample}, {end_sample}) of {total_samples}")
+                        a_waveform = a_waveform[:, :, start_sample:end_sample]
+
+                    audio_dur = (end_sample - start_sample) / sample_rate
+                    fade_in = audio_fade_in_seconds
+                    fade_out = audio_fade_out_seconds
+                    if fade_in + fade_out > audio_dur:
+                        scale = audio_dur / (fade_in + fade_out)
+                        fade_in *= scale
+                        fade_out *= scale
+                        logger.warn("Audio fade durations exceed the audio length and have been scaled down to "
+                                    f"fade_in={fade_in:.3f}s, fade_out={fade_out:.3f}s")
+                    audio_filters = []
+                    if fade_in > 0:
+                        audio_filters.append(f"afade=t=in:st=0:d={fade_in:.6f}"
+                                             f":silence={fade_in_level:.6f}")
+                    if fade_out > 0:
+                        audio_filters.append(f"afade=t=out:st={max(0.0, audio_dur - fade_out):.6f}"
+                                             f":d={fade_out:.6f}:silence={fade_out_level:.6f}")
+                    if audio_filters:
+                        #Must come before apad so the fade applies to the real audio, not the silence
+                        afade_args = ["-af", ",".join(audio_filters)]
+            if a_waveform is not None:
+                # Create audio file if input was provided
+                output_file_with_audio = f"{filename}{format_counter}-audio.{video_format['extension']}"
+                output_file_with_audio_path = os.path.join(full_output_folder, output_file_with_audio)
+                if "audio_pass" not in video_format:
+                    logger.warn("Selected video format does not have explicit audio support")
+                    video_format["audio_pass"] = ["-c:a", "libopus"]
+
+
+                # FFmpeg command with audio re-encoding
+                #TODO: expose audio quality options if format widgets makes it in
+                #Reconsider forcing apad/shortest
+                channels = a_waveform.size(1)
+                min_audio_dur = total_frames_output / frame_rate + 1
+                if video_format.get('trim_to_audio', 'False') != 'False':
+                    apad = []
+                else:
+                    apad = ["-af", "apad=whole_dur="+str(min_audio_dur)]
+                mux_args = [ffmpeg_path, "-v", "error", "-n", "-i", file_path,
+                            "-ar", str(audio['sample_rate']), "-ac", str(channels),
+                            "-f", "f32le", "-i", "-", "-c:v", "copy"] \
+                            + video_format["audio_pass"] \
+                            + afade_args + apad + ["-shortest", output_file_with_audio_path]
+
+                audio_data = a_waveform.squeeze(0).transpose(0,1) \
+                        .numpy().tobytes()
+                merge_filter_args(mux_args, '-af')
+                logger.info(f"Executing audio mux: {' '.join(map(str, mux_args))}")
+                try:
+                    res = subprocess.run(mux_args, input=audio_data,
+                                         env=env, capture_output=True, check=True)
+                except subprocess.CalledProcessError as e:
+                    raise Exception("An error occured in the ffmpeg subprocess:\n" \
+                            + e.stderr.decode(*ENCODE_ARGS))
+                if res.stderr:
+                    print(res.stderr.decode(*ENCODE_ARGS), end="", file=sys.stderr)
+                output_files.append(output_file_with_audio_path)
+                #The silent video was only an intermediate for the mux, delete it
+                if file_path in output_files:
+                    output_files.remove(file_path)
+                if os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                        logger.info(f"Removed intermediate silent video: {file_path}")
+                    except OSError as e:
+                        logger.warn(f"Failed to remove intermediate silent video {file_path}: {e}")
+                #Return this file with audio to the webui.
+                #It will be muted unless opened or saved with right click
+                file = output_file_with_audio
+        if extra_options.get('VHS_KeepIntermediate', True) == False:
+            for intermediate in output_files[1:-1]:
+                if os.path.exists(intermediate):
+                    os.remove(intermediate)
+        preview = {
+                "filename": file,
+                "subfolder": subfolder,
+                "type": "output" if save_output else "temp",
+                "format": format,
+                "frame_rate": frame_rate,
+                "workflow": first_image_file if 'first_image_file' in locals() else None,
+                "fullpath": output_files[-1],
+            }
+        if num_frames == 1 and 'png' in format and '%03d' in file:
+            preview['format'] = 'image/png'
+            preview['filename'] = file.replace('%03d', '001')
+
+        video_filename = file
+        video_filebasename = os.path.splitext(file)[0]
+        thumbnail_tensor = first_image.unsqueeze(0)
+
+        # 出力フォルダ外はComfyUIの/view APIで配信できないためプレビュー対象外
+        ui = {} if is_outside else {"gifs": [preview]}
+        return {"ui": ui, "result": ((save_output, output_files), thumbnail_tensor, video_filename, video_filebasename)}
+
 class LoadAudio:
     @classmethod
     def INPUT_TYPES(s):
@@ -1520,6 +2067,7 @@ class SelectLatest:
 NODE_CLASS_MAPPINGS = {
     "VHS_VideoCombine": VideoCombine,
     "VHS_VideoCombine2": VideoCombine2,
+    "VHS_VideoCombine3": VideoCombine3,
     "VHS_LoadVideo": LoadVideoUpload,
     "VHS_LoadVideo2": LoadVideoUpload2,
     "VHS_LoadVideoPath": LoadVideoPath,
@@ -1566,6 +2114,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_VideoCombine": "Video Combine 🎥🅥🅗🅢",
     "VHS_VideoCombine2": "Video Combine 2 🎥🅥🅗🅢",
+    "VHS_VideoCombine3": "Video Combine 3 🎥🅥🅗🅢",
     "VHS_LoadVideo": "Load Video (Upload) 🎥🅥🅗🅢",
     "VHS_LoadVideo2": "Load Video (Upload) 2 🎥🅥🅗🅢",
     "VHS_LoadVideoPath": "Load Video (Path) 🎥🅥🅗🅢",
