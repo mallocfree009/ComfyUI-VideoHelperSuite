@@ -1663,10 +1663,17 @@ class VideoCombine3:
                     apad = []
                 else:
                     apad = ["-af", "apad=whole_dur="+str(min_audio_dur)]
+                #Carry the prompt/workflow metadata over from the silent video.
+                #The mp4 muxer needs use_metadata_tags to write arbitrary tags;
+                #muxers that don't know the flag simply ignore it
+                if video_format.get('save_metadata', 'False') != 'False':
+                    meta_args = ["-map_metadata", "0", "-movflags", "use_metadata_tags"]
+                else:
+                    meta_args = []
                 mux_args = [ffmpeg_path, "-v", "error", "-n", "-i", file_path,
                             "-ar", str(audio['sample_rate']), "-ac", str(channels),
                             "-f", "f32le", "-i", "-", "-c:v", "copy"] \
-                            + video_format["audio_pass"] \
+                            + video_format["audio_pass"] + meta_args \
                             + aspeed_args + afade_args + apad \
                             + ["-shortest", output_file_with_audio_path]
 
