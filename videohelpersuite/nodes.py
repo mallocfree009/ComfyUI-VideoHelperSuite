@@ -1140,6 +1140,49 @@ def trim_frame_iterator(images, skip_first, skip_last):
     return gen()
 
 
+def tap_last_frame(images, holder):
+    """イテレータを素通しさせつつ、最後に流れたフレームを holder[0] に残す。"""
+    def gen():
+        for image in images:
+            holder[0] = image
+            yield image
+    return gen()
+
+
+def squeeze_to_frame(image):
+    """4次元以上のテンソルから単一フレーム(HWC)を取り出す。"""
+    while len(image.shape) > 3:
+        image = image[0]
+    return image
+
+
+def save_frame_image(image, full_output_folder, basename, image_type, metadata=None):
+    """1フレームを画像ファイルとして保存し、パスを返す。image_typeが'None'ならNone。"""
+    if image_type == "None":
+        return None
+    image = squeeze_to_frame(image)
+    if image_type == "png":
+        file_path = os.path.join(full_output_folder, f"{basename}.png")
+        Image.fromarray(tensor_to_bytes(image)).save(
+            file_path,
+            pnginfo=metadata,
+            compress_level=4,
+        )
+        return file_path
+    #Save timestamp information
+    exif = Image.Exif()
+    exif[ExifTags.IFD.Exif] = {36867: datetime.datetime.now().isoformat(" ")[:19]}
+    file_path = os.path.join(full_output_folder, f"{basename}.webp")
+    save_kwargs = {"lossless": True} if image_type == "webp_lossless" else {"quality": 40}
+    Image.fromarray(tensor_to_bytes(image)).save(
+        file_path,
+        format="WEBP",
+        exif=exif,
+        **save_kwargs
+    )
+    return file_path
+
+
 def atempo_chain(ratio):
     """速度比を atempo の有効範囲(0.5-2.0)に収まる係数へ分解する。
 
@@ -1190,6 +1233,10 @@ class VideoCombine3:
                 "audio_fade_out_end_level": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "source_frame_rate": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10000.0, "step": 0.01}),
                 "audio_speed_mode": (["atempo", "resample"], {"default": "atempo"}),
+                "save_first_frame": ("BOOLEAN", {"default": False}),
+                "first_frame_suffix": ("STRING", {"default": "_first"}),
+                "save_last_frame": ("BOOLEAN", {"default": False}),
+                "last_frame_suffix": ("STRING", {"default": "_last"}),
             },
             "hidden": ContainsAll({
                 "prompt": "PROMPT",
@@ -1198,8 +1245,9 @@ class VideoCombine3:
             }),
         }
 
-    RETURN_TYPES = ("IMAGE", "IMAGE", "VHS_FILENAMES", "STRING", "STRING")
-    RETURN_NAMES = ("images", "image_thumbnail", "Filenames", "filename", "filebasename")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "VHS_FILENAMES", "STRING", "STRING")
+    RETURN_NAMES = ("images", "first_frame", "last_frame",
+                    "Filenames", "filename", "filebasename")
     OUTPUT_NODE = True
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
     FUNCTION = "combine_video"
@@ -1231,6 +1279,10 @@ class VideoCombine3:
         audio_fade_out_end_level=0.0,
         source_frame_rate=0.0,
         audio_speed_mode="atempo",
+        save_first_frame=False,
+        first_frame_suffix="_first",
+        save_last_frame=False,
+        last_frame_suffix="_last",
         **kwargs
     ):
         if latents is not None:
@@ -1297,12 +1349,17 @@ class VideoCombine3:
             #repush first_image
             images = itertools.chain([first_image], images)
             #A single image has 3 dimensions. Discard higher dimensions
-            while len(first_image.shape) > 3:
-                first_image = first_image[0]
+            first_image = squeeze_to_frame(first_image)
+            #遅延評価のままなので最終フレームはエンコード完走後にしか判明しない
+            last_frame_holder = [None]
+            images = tap_last_frame(images, last_frame_holder)
+            last_image = None
         else:
             if skip_first_frames or skip_last_frames:
                 images = images[skip_first_frames:num_frames_in - skip_last_frames]
             first_image = images[0]
+            last_image = squeeze_to_frame(images[-1])
+            last_frame_holder = None
             images = iter(images)
         # get output information
         output_dir = (
@@ -1359,42 +1416,23 @@ class VideoCombine3:
             format_counter = f"_{counter:05}"
 
         # save first frame as png to keep metadata
-        file_path = None
-        if thumbnail_type == "png":
-            first_image_file = f"{filename}{format_counter}.png"
-            file_path = os.path.join(full_output_folder, first_image_file)
-            Image.fromarray(tensor_to_bytes(first_image)).save(
-                file_path,
-                pnginfo=metadata,
-                compress_level=4,
-            )
-        elif thumbnail_type == "webp":
-            first_image_file = f"{filename}{format_counter}.webp"
-            file_path = os.path.join(full_output_folder, first_image_file)
-            #Save timestamp information
-            exif = Image.Exif()
-            exif[ExifTags.IFD.Exif] = {36867: datetime.datetime.now().isoformat(" ")[:19]}
-            Image.fromarray(tensor_to_bytes(first_image)).save(
-                file_path,
-                format="WEBP",
-                exif=exif,
-                quality=40 # thumbnail quality
-            )
-        elif thumbnail_type == "webp_lossless":
-            first_image_file = f"{filename}{format_counter}.webp"
-            file_path = os.path.join(full_output_folder, first_image_file)
-            #Save timestamp information
-            exif = Image.Exif()
-            exif[ExifTags.IFD.Exif] = {36867: datetime.datetime.now().isoformat(" ")[:19]}
-            Image.fromarray(tensor_to_bytes(first_image)).save(
-                file_path,
-                format="WEBP",
-                exif=exif,
-                lossless=True
-            )
-
+        file_path = save_frame_image(first_image, full_output_folder,
+                                     f"{filename}{format_counter}", thumbnail_type, metadata)
         if file_path is not None:
+            first_image_file = os.path.basename(file_path)
             output_files.append(file_path)
+
+        #先頭/末尾フレームの個別出力。動画のベース名にsuffixを付けた名前で保存する。
+        #thumbnail_typeが"None"でも保存できるようpngへフォールバックする
+        frame_image_type = thumbnail_type if thumbnail_type != "None" else "png"
+        extra_frame_files = []
+        if save_first_frame:
+            first_frame_path = save_frame_image(
+                first_image, full_output_folder,
+                f"{filename}{format_counter}{first_frame_suffix}",
+                frame_image_type, metadata)
+            extra_frame_files.append(first_frame_path)
+            print(f"VHS Output File: {first_frame_path}")
 
         for output_file in output_files:
             print(f"VHS Output File: {output_file}")
@@ -1709,6 +1747,22 @@ class VideoCombine3:
             for intermediate in output_files[1:-1]:
                 if os.path.exists(intermediate):
                     os.remove(intermediate)
+
+        #遅延評価の場合、エンコードを完走して初めて末尾フレームが確定する
+        if last_frame_holder is not None and last_frame_holder[0] is not None:
+            last_image = squeeze_to_frame(last_frame_holder[0])
+        if save_last_frame:
+            if last_image is None:
+                logger.warn("VideoCombine3: could not determine the last frame, "
+                            "skipping the last frame output")
+            else:
+                last_frame_path = save_frame_image(
+                    last_image, full_output_folder,
+                    f"{filename}{format_counter}{last_frame_suffix}",
+                    frame_image_type, metadata)
+                extra_frame_files.append(last_frame_path)
+                print(f"VHS Output File: {last_frame_path}")
+
         preview = {
                 "filename": file,
                 "subfolder": subfolder,
@@ -1724,14 +1778,20 @@ class VideoCombine3:
 
         video_filename = file
         video_filebasename = os.path.splitext(file)[0]
-        thumbnail_tensor = first_image.unsqueeze(0)
+        first_frame_tensor = first_image.unsqueeze(0)
         #latent入力(VAE経由)ではIMAGEの入力が無いので、代わりに先頭フレームを返す
         if passthrough_images is None:
-            passthrough_images = thumbnail_tensor
+            passthrough_images = first_frame_tensor
+        last_frame_tensor = first_frame_tensor if last_image is None else last_image.unsqueeze(0)
+
+        #先頭/末尾フレームのファイルはpreview確定後に足す(preview は output_files[-1] を使うため)
+        output_files.extend(extra_frame_files)
 
         # 出力フォルダ外はComfyUIの/view APIで配信できないためプレビュー対象外
         ui = {} if is_outside else {"gifs": [preview]}
-        return {"ui": ui, "result": (passthrough_images, thumbnail_tensor, (save_output, output_files), video_filename, video_filebasename)}
+        return {"ui": ui, "result": (passthrough_images, first_frame_tensor, last_frame_tensor,
+                                     (save_output, output_files),
+                                     video_filename, video_filebasename)}
 
 class LoadAudio:
     @classmethod
