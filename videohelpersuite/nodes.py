@@ -1198,8 +1198,8 @@ class VideoCombine3:
             }),
         }
 
-    RETURN_TYPES = ("VHS_FILENAMES", "IMAGE", "STRING", "STRING")
-    RETURN_NAMES = ("Filenames", "image_thumbnail", "filename", "filebasename")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "VHS_FILENAMES", "STRING", "STRING")
+    RETURN_NAMES = ("images", "image_thumbnail", "Filenames", "filename", "filebasename")
     OUTPUT_NODE = True
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
     FUNCTION = "combine_video"
@@ -1242,6 +1242,9 @@ class VideoCombine3:
                 images = images['samples']
             else:
                 vae = None
+
+        #入力IMAGEをそのまま流すための参照。VAE経由(latent入力)の場合はIMAGEが存在しないのでNone
+        passthrough_images = images if (vae is None and isinstance(images, torch.Tensor)) else None
 
         if isinstance(images, torch.Tensor) and images.size(0) == 0:
             return ((save_output, []),)
@@ -1722,10 +1725,13 @@ class VideoCombine3:
         video_filename = file
         video_filebasename = os.path.splitext(file)[0]
         thumbnail_tensor = first_image.unsqueeze(0)
+        #latent入力(VAE経由)ではIMAGEの入力が無いので、代わりに先頭フレームを返す
+        if passthrough_images is None:
+            passthrough_images = thumbnail_tensor
 
         # 出力フォルダ外はComfyUIの/view APIで配信できないためプレビュー対象外
         ui = {} if is_outside else {"gifs": [preview]}
-        return {"ui": ui, "result": ((save_output, output_files), thumbnail_tensor, video_filename, video_filebasename)}
+        return {"ui": ui, "result": (passthrough_images, thumbnail_tensor, (save_output, output_files), video_filename, video_filebasename)}
 
 class LoadAudio:
     @classmethod
