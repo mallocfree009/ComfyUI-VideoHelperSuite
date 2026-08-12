@@ -1233,9 +1233,9 @@ class VideoCombine3:
                 "audio_fade_out_end_level": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "source_frame_rate": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10000.0, "step": 0.01}),
                 "audio_speed_mode": (["atempo", "resample"], {"default": "atempo"}),
-                "save_first_frame": ("BOOLEAN", {"default": False}),
+                "first_frame_type": (["None", "png", "webp", "webp_lossless"], {"default": "None"}),
                 "first_frame_suffix": ("STRING", {"default": "_first"}),
-                "save_last_frame": ("BOOLEAN", {"default": False}),
+                "last_frame_type": (["None", "png", "webp", "webp_lossless"], {"default": "None"}),
                 "last_frame_suffix": ("STRING", {"default": "_last"}),
             },
             "hidden": ContainsAll({
@@ -1279,9 +1279,9 @@ class VideoCombine3:
         audio_fade_out_end_level=0.0,
         source_frame_rate=0.0,
         audio_speed_mode="atempo",
-        save_first_frame=False,
+        first_frame_type="None",
         first_frame_suffix="_first",
-        save_last_frame=False,
+        last_frame_type="None",
         last_frame_suffix="_last",
         **kwargs
     ):
@@ -1422,15 +1422,13 @@ class VideoCombine3:
             first_image_file = os.path.basename(file_path)
             output_files.append(file_path)
 
-        #先頭/末尾フレームの個別出力。動画のベース名にsuffixを付けた名前で保存する。
-        #thumbnail_typeが"None"でも保存できるようpngへフォールバックする
-        frame_image_type = thumbnail_type if thumbnail_type != "None" else "png"
+        #先頭/末尾フレームの個別出力。動画のベース名にsuffixを付けた名前で保存する
         extra_frame_files = []
-        if save_first_frame:
-            first_frame_path = save_frame_image(
-                first_image, full_output_folder,
-                f"{filename}{format_counter}{first_frame_suffix}",
-                frame_image_type, metadata)
+        first_frame_path = save_frame_image(
+            first_image, full_output_folder,
+            f"{filename}{format_counter}{first_frame_suffix}",
+            first_frame_type, metadata)
+        if first_frame_path is not None:
             extra_frame_files.append(first_frame_path)
             print(f"VHS Output File: {first_frame_path}")
 
@@ -1751,7 +1749,7 @@ class VideoCombine3:
         #遅延評価の場合、エンコードを完走して初めて末尾フレームが確定する
         if last_frame_holder is not None and last_frame_holder[0] is not None:
             last_image = squeeze_to_frame(last_frame_holder[0])
-        if save_last_frame:
+        if last_frame_type != "None":
             if last_image is None:
                 logger.warn("VideoCombine3: could not determine the last frame, "
                             "skipping the last frame output")
@@ -1759,7 +1757,7 @@ class VideoCombine3:
                 last_frame_path = save_frame_image(
                     last_image, full_output_folder,
                     f"{filename}{format_counter}{last_frame_suffix}",
-                    frame_image_type, metadata)
+                    last_frame_type, metadata)
                 extra_frame_files.append(last_frame_path)
                 print(f"VHS Output File: {last_frame_path}")
 
