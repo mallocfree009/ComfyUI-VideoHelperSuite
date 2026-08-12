@@ -1156,8 +1156,11 @@ def squeeze_to_frame(image):
     return image
 
 
-def save_frame_image(image, full_output_folder, basename, image_type, metadata=None):
-    """1フレームを画像ファイルとして保存し、パスを返す。image_typeが'None'ならNone。"""
+def save_frame_image(image, full_output_folder, basename, image_type, metadata=None, quality=40):
+    """1フレームを画像ファイルとして保存し、パスを返す。image_typeが'None'ならNone。
+
+    qualityは非可逆webpのみで使われる。png/webp_losslessは可逆なので影響しない。
+    """
     if image_type == "None":
         return None
     image = squeeze_to_frame(image)
@@ -1173,7 +1176,7 @@ def save_frame_image(image, full_output_folder, basename, image_type, metadata=N
     exif = Image.Exif()
     exif[ExifTags.IFD.Exif] = {36867: datetime.datetime.now().isoformat(" ")[:19]}
     file_path = os.path.join(full_output_folder, f"{basename}.webp")
-    save_kwargs = {"lossless": True} if image_type == "webp_lossless" else {"quality": 40}
+    save_kwargs = {"lossless": True} if image_type == "webp_lossless" else {"quality": quality}
     Image.fromarray(tensor_to_bytes(image)).save(
         file_path,
         format="WEBP",
@@ -1237,6 +1240,7 @@ class VideoCombine3:
                 "first_frame_suffix": ("STRING", {"default": "_first"}),
                 "last_frame_type": (["None", "png", "webp", "webp_lossless"], {"default": "None"}),
                 "last_frame_suffix": ("STRING", {"default": "_last"}),
+                "frame_webp_quality": ("INT", {"default": 90, "min": 1, "max": 100, "step": 1}),
             },
             "hidden": ContainsAll({
                 "prompt": "PROMPT",
@@ -1283,6 +1287,7 @@ class VideoCombine3:
         first_frame_suffix="_first",
         last_frame_type="None",
         last_frame_suffix="_last",
+        frame_webp_quality=90,
         **kwargs
     ):
         if latents is not None:
@@ -1427,7 +1432,7 @@ class VideoCombine3:
         first_frame_path = save_frame_image(
             first_image, full_output_folder,
             f"{filename}{format_counter}{first_frame_suffix}",
-            first_frame_type, metadata)
+            first_frame_type, metadata, frame_webp_quality)
         if first_frame_path is not None:
             extra_frame_files.append(first_frame_path)
             print(f"VHS Output File: {first_frame_path}")
@@ -1757,7 +1762,7 @@ class VideoCombine3:
                 last_frame_path = save_frame_image(
                     last_image, full_output_folder,
                     f"{filename}{format_counter}{last_frame_suffix}",
-                    last_frame_type, metadata)
+                    last_frame_type, metadata, frame_webp_quality)
                 extra_frame_files.append(last_frame_path)
                 print(f"VHS Output File: {last_frame_path}")
 
