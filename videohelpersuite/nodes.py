@@ -965,7 +965,7 @@ class VideoCombine2:
             bitrate = video_format.get('bitrate')
             if bitrate is not None:
                 bitrate_arg = ["-b:v", str(bitrate) + "M" if video_format.get('megabit') == 'True' else str(bitrate) + "K"]
-            args = [ffmpeg_path, "-v", "error", "-f", "rawvideo", "-pix_fmt", i_pix_fmt,
+            args = [ffmpeg_path, "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", i_pix_fmt,
                     # The image data is in an undefined generic RGB color space, which in practice means sRGB.
                     # sRGB has the same primaries and matrix as BT.709, but a different transfer function (gamma),
                     # called by the sRGB standard name IEC 61966-2-1. However, video hosting platforms like YouTube
