@@ -130,6 +130,14 @@ def tensor_to_shorts(tensor):
 def tensor_to_bytes(tensor):
     return tensor_to_int(tensor, 8).astype(np.uint8)
 
+def write_to_stdin(stdin, data):
+    CHUNK_SIZE = 1024 * 1024
+    if len(data) > CHUNK_SIZE:
+        for i in range(0, len(data), CHUNK_SIZE):
+            stdin.write(data[i:i + CHUNK_SIZE])
+    else:
+        stdin.write(data)
+
 def ffmpeg_process(args, video_format, video_metadata, file_path, env):
 
     res = None
@@ -164,7 +172,7 @@ def ffmpeg_process(args, video_format, video_metadata, file_path, env):
                               stdin=subprocess.PIPE, env=env) as proc:
             try:
                 while frame_data is not None:
-                    proc.stdin.write(frame_data)
+                    write_to_stdin(proc.stdin, frame_data)
                     #TODO: skip flush for increased speed
                     frame_data = yield
                     total_frames_output+=1
@@ -188,7 +196,7 @@ def ffmpeg_process(args, video_format, video_metadata, file_path, env):
                               stdin=subprocess.PIPE, env=env) as proc:
             try:
                 while frame_data is not None:
-                    proc.stdin.write(frame_data)
+                    write_to_stdin(proc.stdin, frame_data)
                     frame_data = yield
                     total_frames_output+=1
                 proc.stdin.flush()
@@ -219,7 +227,7 @@ def gifski_process(args, dimensions, frame_rate, video_format, file_path, env):
                               env=env) as procgs:
             try:
                 while frame_data is not None:
-                    procff.stdin.write(frame_data)
+                    write_to_stdin(procff.stdin, frame_data)
                     frame_data = yield
                 procff.stdin.flush()
                 procff.stdin.close()
