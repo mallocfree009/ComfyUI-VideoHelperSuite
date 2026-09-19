@@ -167,8 +167,9 @@ def cv_frame_generator(video, force_rate, frame_load_cap, skip_first_frames,
     if prev_frame is not None:
         yield prev_frame
 
-def ffmpeg_frame_generator(video, force_rate, frame_load_cap, start_time,
-                           custom_width, custom_height, downscale_ratio=8,
+def ffmpeg_frame_generator(video, force_rate, frame_load_cap, start_time=0,
+                           custom_width=0, custom_height=0, downscale_ratio=8,
+                           skip_first_frames=0, select_every_nth=1,
                            meta_batch=None, unique_id=None):
     args_input = ["-i", video]
     args_dummy = [ffmpeg_path] + args_input +['-c', 'copy', '-frames:v', '1', "-f", "null", "-"]
@@ -213,6 +214,7 @@ def ffmpeg_frame_generator(video, force_rate, frame_load_cap, start_time,
     else:
         duration = 0
 
+    start_time += skip_first_frames / fps_base
     if start_time > 0:
         if start_time > 4:
             post_seek = ['-ss', '4']
@@ -227,6 +229,8 @@ def ffmpeg_frame_generator(video, force_rate, frame_load_cap, start_time,
     vfilters = []
     if force_rate != 0:
         vfilters.append("fps=fps="+str(force_rate))
+    if select_every_nth > 1:
+        vfilters.append(f"select=not(mod(n\\,{select_every_nth}))")
     if custom_width != 0 or custom_height != 0:
         size = target_size(size_base[0], size_base[1], custom_width,
                            custom_height, downscale_ratio=downscale_ratio)
@@ -240,7 +244,8 @@ def ffmpeg_frame_generator(video, force_rate, frame_load_cap, start_time,
         size = size_base
     if len(vfilters) > 0:
         args_all_frames += ["-vf", ",".join(vfilters)]
-    yieldable_frames = (force_rate or fps_base)*duration
+    yieldable_frames = (force_rate or fps_base) * max(duration - start_time, 0)
+    yieldable_frames /= select_every_nth
     if frame_load_cap > 0:
         args_all_frames += ["-frames:v", str(frame_load_cap)]
         yieldable_frames = min(yieldable_frames, frame_load_cap)
@@ -292,7 +297,15 @@ def batched_vae_encode(images, vae, frames_per_batch):
         yield from vae.encode(image_batch).numpy()
 def resized_cv_frame_gen(custom_width, custom_height, downscale_ratio, **kwargs):
     gen = cv_frame_generator(**kwargs)
-    info =  next(gen)
+    try:
+        info = next(gen)
+    except ValueError as e:
+        if "could not be loaded with cv." not in str(e):
+            raise
+        logger.info(f"OpenCV could not decode {kwargs['video']}; falling back to FFmpeg")
+        gen = ffmpeg_frame_generator(custom_width=0, custom_height=0,
+                                     downscale_ratio=downscale_ratio, **kwargs)
+        info = next(gen)
     width, height = info[0], info[1]
     frames_per_batch = (1920 * 1080 * 16) // (width * height) or 1
     if kwargs.get('meta_batch', None) is not None:
