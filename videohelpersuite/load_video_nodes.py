@@ -305,7 +305,7 @@ def resized_cv_frame_gen(custom_width, custom_height, downscale_ratio, **kwargs)
         logger.info(f"OpenCV could not decode {kwargs['video']}; falling back to FFmpeg")
         gen = ffmpeg_frame_generator(custom_width=0, custom_height=0,
                                      downscale_ratio=downscale_ratio, **kwargs)
-        info = next(gen)
+        info = next(gen)[:7]
     width, height = info[0], info[1]
     frames_per_batch = (1920 * 1080 * 16) // (width * height) or 1
     if kwargs.get('meta_batch', None) is not None:
